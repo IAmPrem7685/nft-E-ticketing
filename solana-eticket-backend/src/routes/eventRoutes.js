@@ -1,7 +1,7 @@
 // src/routes/eventRoutes.js
 import express from 'express';
 import supabase from '../config/supabase.js';
-import { createCollectionNFT, deployCandyMachine, uploadMetadataToArweave } from '../services/solanaService.js';
+import { createCollectionNFT, deployCandyMachine, uploadMetadataToIpfs } from '../services/solanaService.js';
 import { generateQrCodeDataUrl } from '../utils/qrCodeGenerator.js';
 
 const router = express.Router();
@@ -45,7 +45,7 @@ router.post('/', async (req, res) => {
                 { trait_type: "Event Name", value: name },
             ]
         };
-        const collectionMetadataUri = await uploadMetadataToArweave(collectionMetadata);
+        const collectionMetadataUri = await uploadMetadataToIpfs(collectionMetadata);
 
         // 2. Create Collection NFT on Solana
         const collectionMintAddress = await createCollectionNFT(name, collectionSymbol, collectionMetadataUri);
@@ -67,11 +67,11 @@ router.post('/', async (req, res) => {
                 time,
                 venue,
                 total_tickets: totalTickets,
-                available_tickets: totalTickets, // Initially all available
+                available_tickets: totalTickets,
                 price_sol: priceSol,
                 price_usd: priceUsd,
-                collection_nft_mint_address: candyMachineId.toBase58(), // Store CM ID here for easy lookup
-                candy_machine_id: candyMachineId.toBase58(),
+                collection_nft_mint_address: collectionMintAddress.toBase58(), // Correctly store the collection mint address
+                candy_machine_id: candyMachineId.toBase58(), // Correctly store the candy machine ID
                 is_active: true
             })
             .select();
@@ -241,3 +241,5 @@ router.post('/:eventId/purchase-initiate', async (req, res) => {
 });
 
 export default router;
+
+

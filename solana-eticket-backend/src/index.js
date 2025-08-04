@@ -1,6 +1,7 @@
 // src/index.js
 import express from 'express';
 import dotenv from 'dotenv';
+import cors from 'cors'; 
 import eventRoutes from './routes/eventRoutes.js';
 import ticketRoutes from './routes/ticketRoutes.js';
 import { startSolanaListener } from './listeners/solanaListener.js';
@@ -11,7 +12,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(express.json()); // For parsing application/json
+app.use(cors());
+app.use(express.json()); // For parsing application/json'
+
 
 // API Routes
 app.use('/api/events', eventRoutes);

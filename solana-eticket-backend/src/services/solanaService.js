@@ -1,89 +1,77 @@
 // src/services/solanaService.js
-import { Connection, Keypair, PublicKey, clusterApiUrl } from '@solana/web3.js';
-import { Metaplex, keypairIdentity, irysStorage, toMetaplexFile, toBigNumber } from '@metaplex-foundation/js'; // Added toBigNumber import
+import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { Metaplex, keypairIdentity, toBigNumber } from '@metaplex-foundation/js';
 import bs58 from 'bs58';
+import { PinataSDK } from "pinata"; 
+import { Blob } from "buffer"; 
 import dotenv from 'dotenv';
-import fs from 'fs';
-import path from 'path';
 
 dotenv.config();
 
 let connection;
 let metaplex;
 let adminKeypair;
+let pinata;
 
 /**
- * Initializes the Solana connection, Metaplex instance, and admin keypair.
+ * Initializes the Solana connection, Metaplex instance, and Pinata SDK.
  */
 export function initializeSolana() {
     try {
         const rpcUrl = process.env.SOLANA_RPC_URL;
-        const wsUrl = process.env.SOLANA_WS_URL; // Get WebSocket URL as well
+        const wsUrl = process.env.SOLANA_WS_URL;
         const adminPrivateKey = process.env.SOLANA_ADMIN_PRIVATE_KEY?.trim();
+        const pinataJwt = process.env.PINATA_JWT;
 
-        if (!rpcUrl) {
-            throw new Error('SOLANA_RPC_URL is not defined in .env');
-        }
-        if (!wsUrl) {
-            throw new Error('SOLANA_WS_URL is not defined in .env');
-        }
-        if (!adminPrivateKey) {
-            throw new Error('SOLANA_ADMIN_PRIVATE_KEY is not defined in .env. This is needed for admin operations like deploying Collection NFTs.');
-        }
+        if (!rpcUrl) throw new Error('SOLANA_RPC_URL is not defined in .env');
+        if (!wsUrl) throw new Error('SOLANA_WS_URL is not defined in .env');
+        if (!adminPrivateKey) throw new Error('SOLANA_ADMIN_PRIVATE_KEY is not defined in .env.');
+        if (!pinataJwt) throw new Error('PINATA_JWT is not defined in .env. Please get it from your Pinata account.');
 
         const decodedPrivateKey = bs58.decode(adminPrivateKey);
         adminKeypair = Keypair.fromSecretKey(decodedPrivateKey);
 
-        connection = new Connection(rpcUrl, 'confirmed'); // Keep 'confirmed' for now
+        connection = new Connection(rpcUrl, 'confirmed');
 
         metaplex = Metaplex.make(connection)
-            .use(keypairIdentity(adminKeypair)) // Use admin keypair for signing
-            // Explicitly configure irysStorage for Devnet
-            .use(irysStorage({
-                address: "https://devnet.irys.xyz", // Irys Devnet bundler address
-                providerUrl: rpcUrl, // Your Helius RPC URL
-                timeout: 60000, // Increase timeout to 60 seconds
-            }));
+            .use(keypairIdentity(adminKeypair));
 
-        console.log('Solana connection and Metaplex initialized.');
+        pinata = new PinataSDK({
+          pinataJwt: pinataJwt,
+          pinataGateway: process.env.GATEWAY_URL || "gateway.pinata.cloud"
+        });
+
+        console.log('Solana connection, Metaplex, and Pinata SDK initialized.');
         console.log('Admin Wallet Public Key:', adminKeypair.publicKey.toBase58());
-        console.log('Using Solana RPC URL:', rpcUrl);
-        console.log('Using Solana WS URL:', wsUrl); // Log WS URL too
 
     } catch (error) {
-        console.error('Failed to initialize Solana services:', error);
-        if (error.message.includes('Non-base58 character')) {
-            console.error('HINT: The SOLANA_ADMIN_PRIVATE_KEY in your .env file might be incorrectly formatted. Ensure it is a valid Base58 encoded private key (e.g., from a keypair.json file).');
-        }
-        console.error('HINT: If you are consistently getting "Confirmed tx not found" errors even with sufficient SOL, consider using a more stable RPC provider like Helius (https://www.helius.xyz/) or QuickNode (https://www.quicknode.com/) for your SOLANA_RPC_URL and SOLANA_WS_URL.');
+        console.error('Failed to initialize services:', error);
         process.exit(1);
     }
 }
 
 /**
- * Uploads metadata to Arweave/Irys.
- * In a real application, you might upload an image first, then the JSON metadata.
+ * Uploads metadata to IPFS using the modern Pinata SDK.
  * @param {object} metadata - The JSON metadata for the NFT.
  * @returns {Promise<string>} The URI of the uploaded metadata.
  */
-export async function uploadMetadataToArweave(metadata) {
+export async function uploadMetadataToIpfs(metadata) {
     try {
-        console.log('Uploading metadata to Arweave/Irys...');
-        // Check admin wallet balance before funding Irys
-        const balance = await connection.getBalance(adminKeypair.publicKey);
-        console.log(`Admin wallet balance before Irys upload: ${balance / 1_000_000_000} SOL`);
+        console.log('Uploading metadata to IPFS via Pinata...');
 
-        const { uri, response } = await metaplex.nfts().uploadMetadata(metadata);
-        console.log('Metadata uploaded. URI:', uri);
-        // Log the Irys response if available for more debugging info
-        if (response && response.id) {
-            console.log(`Irys upload transaction ID: ${response.id}`);
-            console.log(`Check Irys upload status: https://viewblock.io/arweave/tx/${response.id}`); // This might not always work for Irys bundler txs directly
-        }
-        return uri;
+        const metadataString = JSON.stringify(metadata);
+        const metadataBuffer = Buffer.from(metadataString, 'utf-8');
+        const blob = new Blob([metadataBuffer]);
+        const file = new File([blob], "metadata.json", { type: "application/json"});
+
+        const result = await pinata.upload.public.file(file);
+
+        console.log('Metadata uploaded. IPFS Hash (CID):', result.cid);
+        return `https://${pinata.gateway}/ipfs/${result.cid}`;
+
     } catch (error) {
-        console.error('Error uploading metadata to Arweave:', error);
-        throw new Error('Failed to upload metadata to Arweave.');
+        console.error('Error uploading metadata to IPFS:', error);
+        throw new Error('Failed to upload metadata to IPFS.');
     }
 }
 
@@ -102,9 +90,9 @@ export async function createCollectionNFT(eventName, symbol, uri) {
             name: eventName,
             symbol: symbol,
             uri: uri,
-            sellerFeeBasisPoints: 0, // Collection NFTs typically don't have royalties
-            isMutable: true, // Can be updated later if needed
-            isCollection: true, // Mark as a collection NFT
+            sellerFeeBasisPoints: 0, 
+            isMutable: true, 
+            isCollection: true, 
             updateAuthority: adminKeypair,
         }, { commitment: 'finalized' });
 
@@ -117,43 +105,75 @@ export async function createCollectionNFT(eventName, symbol, uri) {
 }
 
 /**
- * Deploys a Metaplex Candy Machine V3 for an event.
- * NOTE: This is a simplified representation. Full Candy Machine deployment
- * often involves more complex configuration and can be done via CLI or a dedicated script.
- * This function primarily sets up the parameters.
- * @param {PublicKey} collectionMintAddress - The mint address of the Collection NFT.
- * @param {number} priceInSol - The price per ticket in SOL.
- * @param {number} numberOfTickets - Total number of tickets to be minted.
- * @returns {Promise<PublicKey>} The Candy Machine ID.
+ * Adds individual NFT metadata to the Candy Machine in batches.
+ * This is a necessary step before minting can begin.
+ */
+export async function addItemsToCandyMachine(candyMachineAddress, items, batchSize = 5) {
+    try {
+        const candyMachine = await metaplex.candyMachines().findByAddress({ address: candyMachineAddress });
+        
+        console.log(`Adding ${items.length} items to Candy Machine in batches of ${batchSize}...`);
+
+        for (let i = 0; i < items.length; i += batchSize) {
+            const batch = items.slice(i, i + batchSize);
+            console.log(`Processing batch ${Math.floor(i / batchSize) + 1}...`);
+            const { response } = await metaplex.candyMachines().insertItems({
+                candyMachine,
+                items: batch,
+            }, { commitment: 'finalized' });
+            console.log(`Batch ${Math.floor(i / batchSize) + 1} successfully added. Signature: ${response.signature}`);
+        }
+
+        console.log('All items successfully added to Candy Machine.');
+
+    } catch (error) {
+        console.error('Error adding items to Candy Machine:', error);
+        throw new Error('Failed to add items to Candy Machine.');
+    }
+}
+
+
+/**
+ * Deploys a Metaplex Candy Machine V3 and adds items to it.
  */
 export async function deployCandyMachine(collectionMintAddress, priceInSol, numberOfTickets) {
     try {
         console.log(`Deploying Candy Machine for collection: ${collectionMintAddress.toBase58()}...`);
 
-        // Corrected startDate guard: use toBigNumber with Unix timestamp in seconds
         const guards = {
             solPayment: {
-                amount: { basisPoints: priceInSol * 1_000_000_000, currency: { symbol: 'SOL', decimals: 9 } },
-                destination: adminKeypair.publicKey, // Wallet to receive payments
+                amount: { basisPoints: toBigNumber(priceInSol * 1_000_000_000), currency: { symbol: 'SOL', decimals: 9 } },
+                destination: adminKeypair.publicKey,
             },
-            startDate: { date: toBigNumber(Math.floor(new Date().getTime() / 1000)) }, // Corrected: Unix timestamp in seconds
-            // Add other guards like endDate, whitelist, etc.
+            startDate: { date: toBigNumber(Math.floor(new Date().getTime() / 1000)) },
         };
 
         const { candyMachine } = await metaplex.candyMachines().create({
-            itemsAvailable: numberOfTickets,
-            sellerFeeBasisPoints: 500, // 5% royalty on secondary sales (adjust as needed)
+            itemsAvailable: toBigNumber(numberOfTickets),
+            sellerFeeBasisPoints: 500,
             symbol: 'TICKET',
-            maxSupply: numberOfTickets,
+            maxSupply: toBigNumber(0),
+            isMutable: true,
             collection: {
                 address: collectionMintAddress,
                 updateAuthority: adminKeypair,
             },
-            // Use the `guards` property for Candy Machine V3
             guards: guards,
         }, { commitment: 'finalized' });
 
         console.log('Candy Machine deployed. ID:', candyMachine.address.toBase58());
+        
+        console.log('Preparing items to insert into the Candy Machine...');
+        const items = [];
+        for (let i = 1; i <= numberOfTickets; i++) {
+            items.push({
+                name: `Event Ticket #${i}`,
+                uri: "https://gateway.pinata.cloud/ipfs/Qmd5eR4bXQT32x4N82sGbA28z257NUDYg2P2kxy5u2yB1M" 
+            });
+        }
+        
+        await addItemsToCandyMachine(candyMachine.address, items);
+
         return candyMachine.address;
     } catch (error) {
         console.error('Error deploying Candy Machine:', error);
@@ -163,33 +183,22 @@ export async function deployCandyMachine(collectionMintAddress, priceInSol, numb
 
 /**
  * Verifies the ownership of a cNFT on the Solana blockchain.
- * This function uses the Bubblegum program to get details for compressed NFTs.
- * @param {string} nftMintAddress - The mint address of the cNFT.
- * @param {string} expectedOwnerWalletAddress - The public key of the wallet expected to own the NFT.
- * @returns {Promise<boolean>} True if the NFT exists and is owned by the expected wallet, false otherwise.
  */
 export async function verifyTicketOwnershipOnChain(nftMintAddress, expectedOwnerWalletAddress) {
     try {
         console.log(`Verifying ownership for NFT: ${nftMintAddress} by ${expectedOwnerWalletAddress}...`);
         const nftPublicKey = new PublicKey(nftMintAddress);
         const ownerPublicKey = new PublicKey(expectedOwnerWalletAddress);
-
-        // Fetch the asset using Metaplex's Bubblegum (for cNFTs)
-        const asset = await metaplex.nfts().findNftByMint({ mintAddress: nftPublicKey });
-
+        const asset = await metaplex.nfts().findByMint({ mintAddress: nftPublicKey });
         if (!asset) {
             console.warn(`NFT with mint address ${nftMintAddress} not found.`);
             return false;
         }
-
-        // For cNFTs, the owner is typically found in asset.ownership.owner
         const currentOwner = asset.ownership?.owner;
-
         if (!currentOwner) {
             console.warn(`Owner not found for NFT ${nftMintAddress}.`);
             return false;
         }
-
         if (currentOwner.toBase58() === ownerPublicKey.toBase58()) {
             console.log(`NFT ${nftMintAddress} is owned by ${expectedOwnerWalletAddress}. Verification successful.`);
             return true;
@@ -199,19 +208,17 @@ export async function verifyTicketOwnershipOnChain(nftMintAddress, expectedOwner
         }
     } catch (error) {
         console.error(`Error verifying NFT ownership for ${nftMintAddress}:`, error);
-        return false; // Return false on any error during verification
+        return false;
     }
 }
 
 /**
  * Fetches details of a compressed NFT (cNFT) from the blockchain.
- * @param {string} nftMintAddress - The mint address of the cNFT.
- * @returns {Promise<any | null>} The NFT object or null if not found. (Changed return type to 'any' as specific types are not directly imported)
  */
 export async function getCNFTDetails(nftMintAddress) {
     try {
         const nftPublicKey = new PublicKey(nftMintAddress);
-        const asset = await metaplex.nfts().findNftByMint({ mintAddress: nftPublicKey });
+        const asset = await metaplex.nfts().findByMint({ mintAddress: nftPublicKey });
         return asset;
     } catch (error) {
         console.error(`Error fetching cNFT details for ${nftMintAddress}:`, error);

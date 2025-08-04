@@ -1,0 +1,9 @@
+{
+  "name": "Test Ticket #1",
+  "symbol": "TICKET",
+  "description": "A test NFT ticket.",
+  "image": "ticket.png",
+  "properties": {
+    "files": [{ "uri": "ticket.png", "type": "image/png" }]
+  }
+}
